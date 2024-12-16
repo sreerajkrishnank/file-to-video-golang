@@ -1,0 +1,148 @@
+package main
+
+import (
+    "fmt"
+    "log"
+    "math"
+    "os"
+
+    "gocv.io/x/gocv"
+)
+
+// fileToVideo reads a file and encodes it into a video.
+// Each pixel stores one byte (8 bits) in the Blue channel.
+// Green and Red channels are set to 0.
+func fileToVideo(inputFilename, outputFilename string, width, height, fps int) error {
+    data, err := os.ReadFile(inputFilename)
+    if err != nil {
+        return fmt.Errorf("failed to read input file: %v", err)
+    }
+
+    // Each pixel = 1 byte
+    bytesPerFrame := width * height
+    totalFrames := int(math.Ceil(float64(len(data)) / float64(bytesPerFrame)))
+
+    // Pad the data if it doesn't exactly fill the last frame
+    requiredBytes := totalFrames * bytesPerFrame
+    if len(data) < requiredBytes {
+        padded := make([]byte, requiredBytes)
+        copy(padded, data)
+        data = padded
+    }
+
+    // Use a lossless codec to prevent data corruption
+    writer, err := gocv.VideoWriterFile(outputFilename, "FFV1", float64(fps), width, height, true)
+    if err != nil {
+        return fmt.Errorf("failed to create video writer: %v", err)
+    }
+    defer writer.Close()
+
+    // Prepare a Mat for output frame (3 channels, 8 bits per channel)
+    frame := gocv.NewMatWithSize(height, width, gocv.MatTypeCV8UC3)
+    defer frame.Close()
+
+    frameData,_ := frame.DataPtrUint8()
+    if frameData == nil {
+        return fmt.Errorf("failed to get frame data pointer")
+    }
+
+    dataIndex := 0
+    for f := 0; f < totalFrames; f++ {
+        frameBytes := data[dataIndex : dataIndex+bytesPerFrame]
+        dataIndex += bytesPerFrame
+
+        // For each pixel, store the byte in the Blue channel.
+        // Set Green and Red to 0 for simplicity.
+        for i := 0; i < width*height; i++ {
+            offset := i * 3
+            // Blue channel holds the byte
+            blueVal := frameBytes[i]
+            frameData[offset] = blueVal
+            frameData[offset+1] = 0 // Green
+            frameData[offset+2] = 0 // Red
+        }
+
+        if err := writer.Write(frame); err != nil {
+            return fmt.Errorf("error writing frame %d: %v", f, err)
+        }
+    }
+
+    return nil
+}
+
+// videoToFile decodes a video created by fileToVideo back into a file.
+// Reads one byte per pixel from the Blue channel.
+func videoToFile(inputVideo, outputFilename string) error {
+    cap, err := gocv.VideoCaptureFile(inputVideo)
+    if err != nil {
+        return fmt.Errorf("failed to open video: %v", err)
+    }
+    defer cap.Close()
+
+    var allBytes []byte
+
+    frame := gocv.NewMat()
+    defer frame.Close()
+
+    for {
+        if ok := cap.Read(&frame); !ok || frame.Empty() {
+            break
+        }
+
+        frameData,_ := frame.DataPtrUint8()
+        if frameData == nil {
+            return fmt.Errorf("failed to get frame data pointer from decoded frame")
+        }
+
+        pixelCount := frame.Rows() * frame.Cols()
+        for i := 0; i < pixelCount; i++ {
+            offset := i * 3
+            blueVal := frameData[offset] // Blue channel holds the stored byte
+            allBytes = append(allBytes, blueVal)
+        }
+    }
+
+    // Write the reconstructed bytes to file
+    err = os.WriteFile(outputFilename, allBytes, 0644)
+    if err != nil {
+        return fmt.Errorf("failed to write output file: %v", err)
+    }
+
+    return nil
+}
+
+func main() {
+    if len(os.Args) != 3 {
+        fmt.Println("Usage:")
+        fmt.Println("  Encode: go run main.go -e <input_file>")
+        fmt.Println("  Decode: go run main.go -d <input_video>")
+        os.Exit(1)
+    }
+
+    operation := os.Args[1]
+    inputFile := os.Args[2]
+
+    switch operation {
+    case "-e":
+        // Encode workflow: 1 byte per pixel, using a lossless codec
+        outputVideo := inputFile + ".mkv"
+        err := fileToVideo(inputFile, outputVideo, 640, 480, 30)
+        if err != nil {
+            log.Fatalf("Encoding failed: %v", err)
+        }
+        fmt.Printf("Encoded %s into %s with 1 byte/pixel (lossless)\n", inputFile, outputVideo)
+
+    case "-d":
+        // Decode workflow
+        outputFile := inputFile + ".decoded"
+        err := videoToFile(inputFile, outputFile)
+        if err != nil {
+            log.Fatalf("Decoding failed: %v", err)
+        }
+        fmt.Printf("Decoded %s into %s\n", inputFile, outputFile)
+
+    default:
+        fmt.Println("Invalid operation. Use -e for encode or -d for decode")
+        os.Exit(1)
+    }
+}
